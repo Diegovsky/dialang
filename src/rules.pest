@@ -1,0 +1,25 @@
+
+WHITESPACE = _{ (" " | "\t")+ } 
+EOL = _{NEWLINE+}
+EOL0 = _{ NEWLINE* }
+
+name = @{ (ASCII_ALPHANUMERIC|"_")+ }
+
+field = {
+    name ~ name
+}
+
+def = { name ~ "{" ~ EOL ~ (field ~ EOL)* ~ "}"}
+link_n = {
+    ("1" ~ ("?")?)|
+    "n"
+}
+ARROW_BODY = _{("=" | "-")+}
+link = {
+    name ~ link_n ~ ARROW_BODY ~ link_n ~ name ~ (":" ~ name)?
+}
+
+document = {
+    EOL0 ~ ((def|link) ~ EOL)+
+}
+
