@@ -1,7 +1,9 @@
 
-WHITESPACE = _{ (" " | "\t")+ } 
-EOL = _{NEWLINE+}
-EOL0 = _{ NEWLINE* }
+WHITESPACE = _{ (" " | "\t") }
+COMMENT = _{"#" ~ (!NEWLINE ~ ANY)* ~ &NEWLINE}
+LINE = _{NEWLINE ~ WHITESPACE* ~ COMMENT?}
+EOL = _{LINE+}
+EOL0 = _{ LINE* }
 
 name = @{ (ASCII_ALPHANUMERIC|"_")+ }
 
@@ -10,16 +12,15 @@ field = {
 }
 
 def = { name ~ "{" ~ EOL ~ (field ~ EOL)* ~ "}"}
-link_n = {
-    ("1" ~ ("?")?)|
-    "n"
+link_n = @{
+    ("1"|"n") ~ ("?")?
 }
-ARROW_BODY = _{("=" | "-")+}
+ARROW_BODY = {("=" | "-")+}
 link = {
     name ~ link_n ~ ARROW_BODY ~ link_n ~ name ~ (":" ~ name)?
 }
 
 document = {
-    EOL0 ~ ((def|link) ~ EOL)+
+    EOL0 ~ ((def|link) ~ EOL)+ ~ EOI
 }
 

@@ -1,9 +1,11 @@
-use std::{fmt::Display, io::Write};
+use std::{fmt::Display, io::Write, path::PathBuf};
 
 use pest::{
     Parser,
     iterators::{Pair, Pairs},
 };
+
+use crate::emitters::{emit_der, emit_orm};
 
 #[derive(pest_derive::Parser)]
 #[grammar = "rules.pest"]
@@ -43,6 +45,7 @@ enum LinkN {
     One,
     MaybeOne,
     Many,
+    MaybeMany,
 }
 
 impl Display for LinkN {
@@ -53,7 +56,8 @@ impl Display for LinkN {
             match self {
                 LinkN::One => "1",
                 LinkN::MaybeOne => "(0,1)",
-                LinkN::Many => "(0,N)",
+                LinkN::Many => "(1,N)",
+                LinkN::MaybeMany => "(0,N)",
             }
         )
     }
@@ -62,10 +66,13 @@ impl Display for LinkN {
 impl Parse for LinkN {
     fn parse(tk: Token) -> ParseResult<Self> {
         ensure_rule!(tk, Rule::link_n);
-        Ok(match tk.as_str() {
+        Ok(match tk.as_str().trim() {
             "1" => Self::One,
+            "1?" => Self::MaybeOne,
             "n" => Self::Many,
-            _ => Self::MaybeOne,
+            "n?" => Self::MaybeMany,
+
+            _ => unreachable!("Unknown"),
         })
     }
 }
@@ -76,10 +83,25 @@ impl Parse for String {
         Ok(tk.as_str().to_owned())
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkBody {
+    is_pk: bool,
+}
+
+impl Parse for LinkBody {
+    fn parse(tk: Token) -> ParseResult<Self> {
+        ensure_rule!(tk, Rule::ARROW_BODY);
+        let is_pk = tk.as_str().contains('=');
+        Ok(Self { is_pk })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Link {
     from: String,
     from_count: LinkN,
+    body: LinkBody,
     to_count: LinkN,
     to: String,
     label: Option<String>,
@@ -91,11 +113,13 @@ impl Parse for Link {
         let mut tk = tk.into_inner();
         let from: String = tk.next_item()?;
         let from_count: LinkN = tk.next_item()?;
+        let body: LinkBody = tk.next_item()?;
         let to_count: LinkN = tk.next_item()?;
         let to: String = tk.next_item()?;
         Ok(Self {
             from,
             from_count,
+            body,
             to_count,
             to,
             label: tk.next_item().ok(),
@@ -126,8 +150,8 @@ impl Parse for Def {
         for field in def {
             let mut field = field.into_inner();
             fields.push(Field {
-                name: field.next_item()?,
                 field_type: field.next_item()?,
+                name: field.next_item()?,
             })
         }
         let def = Def { name, fields };
@@ -135,44 +159,29 @@ impl Parse for Def {
     }
 }
 
-fn emit_graph(f: &mut dyn Write, links: Vec<Link>, defs: Vec<Def>) -> std::io::Result<()> {
-    writeln!(f, "graph {{")?;
-    writeln!(f, "node [shape=plaintext];")?;
-    for def in defs {
-        let name = def.name;
-        writeln!(
-            f,
-            r#"{name} [label=<
-            <TABLE border="0" cellborder="1" cellspacing="0">
-            <TR><TD colspan="2" bgcolor="gray">{name}</TD></TR>"#
-        )?;
-        for Field { field_type, name } in def.fields {
-            writeln!(f, "<TR><TD>{field_type}</TD><TD>{name}</TD></TR>")?;
-        }
-        writeln!(f, "</TABLE> >];")?;
-    }
-    writeln!(f, "node [shape=diamond, fontsize=11];")?;
-    for Link {
-        from,
-        from_count,
-        to_count,
-        to,
-        label,
-    } in links
-    {
-        let label = label.unwrap_or_default();
-        let id = format!("{from}_{to}_{label}");
-        writeln!(f, "\t{id} [label=<{label}>];")?;
-        writeln!(f, "\t{from} -- {id} [taillabel=<{from_count}>];")?;
-        writeln!(f, "\t{id} -- {to}   [headlabel=<{to_count}>];")?;
-    }
-    writeln!(f, "}}")?;
-    Ok(())
+mod emitters;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, strum::EnumString)]
+#[strum(serialize_all = "lowercase")]
+enum Mode {
+    #[default]
+    DER,
+    ORM,
+}
+
+#[derive(argh::FromArgs)]
+/// DiaLang compiler
+struct Args {
+    #[argh(positional)]
+    input: PathBuf,
+    #[argh(option, short = 'm', default = "Mode::default()")]
+    /// output mode
+    mode: Mode,
 }
 
 fn main() {
-    let file = std::fs::read_to_string(std::env::args().nth(1).expect("Missing input file"))
-        .expect("Failed to open input file");
+    let args = argh::from_env::<Args>();
+    let file = std::fs::read_to_string(args.input).expect("Failed to open input file");
     let mut parser = MyParser::parse(Rule::document, &file).expect("Failed to parse input file");
     let doc = parser.next().unwrap();
     let mut links: Vec<Link> = vec![];
@@ -181,9 +190,19 @@ fn main() {
         match tk.as_rule() {
             Rule::link => links.push(Link::parse(tk).unwrap()),
             Rule::def => defs.push(Def::parse(tk).unwrap()),
-            _ => unreachable!(),
+            Rule::EOI => break,
+            _ => unreachable!("Got token {:?}", tk.as_rule()),
         }
     }
-    emit_graph(&mut std::io::stdout(), links.clone(), defs.clone()).unwrap();
-    emit_graph(&mut std::io::stderr(), links.clone(), defs.clone()).unwrap();
+    let emitter = match args.mode {
+        Mode::DER => emit_der,
+        Mode::ORM => emit_orm,
+    };
+    emitter(&mut std::io::stdout(), links.clone(), defs.clone()).unwrap();
+    emitter(
+        &mut std::fs::File::create("out.dot").unwrap(),
+        links.clone(),
+        defs.clone(),
+    )
+    .unwrap();
 }
