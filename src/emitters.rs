@@ -2,18 +2,18 @@ use std::{collections::HashMap, fmt::Display, io::Write, path::PathBuf};
 
 use crate::*;
 
-pub fn emit_der(f: &mut dyn Write, links: Vec<Link>, defs: Vec<Def>) -> std::io::Result<()> {
+pub fn emit_der(f: &mut dyn Write, Doc { links, defs }: &Doc) -> std::io::Result<()> {
     writeln!(f, "graph {{")?;
     writeln!(f, "node [shape=plaintext];")?;
     for def in defs {
-        let name = def.name;
+        let name = &def.name;
         writeln!(
             f,
             r#"{name} [label=<
             <TABLE border="0" cellborder="1" cellspacing="0">
             <TR><TD colspan="2" bgcolor="gray">{name}</TD></TR>"#
         )?;
-        for Field { field_type, name } in def.fields {
+        for Field { field_type, name } in &def.fields {
             writeln!(f, "<TR><TD>{field_type}</TD><TD>{name}</TD></TR>")?;
         }
         writeln!(f, "</TABLE> >];")?;
@@ -28,7 +28,7 @@ pub fn emit_der(f: &mut dyn Write, links: Vec<Link>, defs: Vec<Def>) -> std::io:
         ..
     } in links
     {
-        let label = label.unwrap_or_default();
+        let label = label.as_deref().unwrap_or_default();
         let id = format!("{from}_{to}_{label}");
         writeln!(f, "\t{id} [label=<{label}>];")?;
         writeln!(f, "\t{from} -- {id} [taillabel=<{from_count}>];")?;
@@ -47,17 +47,17 @@ fn table_fields(f: &mut dyn Write, fields: &[&str]) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn emit_orm(f: &mut dyn Write, links: Vec<Link>, defs: Vec<Def>) -> std::io::Result<()> {
+pub fn emit_orm(f: &mut dyn Write, Doc { links, defs }: &Doc) -> std::io::Result<()> {
     writeln!(f, "digraph {{")?;
     writeln!(f, "graph [layout=dot];")?;
     writeln!(f, "node [shape=plaintext];")?;
     let mut def_links: HashMap<&str, Vec<&Link>> =
         defs.iter().map(|def| (&*def.name, vec![])).collect();
-    for link in &links {
+    for link in links {
         def_links.get_mut(&*link.from).unwrap().push(link)
     }
     let def_links = def_links;
-    for def in &defs {
+    for def in defs {
         let name = def.name.as_str();
         writeln!(
             f,

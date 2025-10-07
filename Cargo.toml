@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
 argh = "0.1.13"
 easy-ext = "1.0.2"
+notify = "8.2.0"
 pest = "2.8.2"
 pest_derive = "2.8.2"
 strum = { version = "0.27.2", features = ["derive"] }

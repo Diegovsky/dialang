@@ -1,5 +1,12 @@
-use std::{fmt::Display, io::Write, path::PathBuf};
+use std::{
+    fmt::Display,
+    io::{BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
+use anyhow::{Context, bail};
+use notify::Watcher;
 use pest::{
     Parser,
     iterators::{Pair, Pairs},
@@ -25,6 +32,13 @@ macro_rules! ensure_rule {
 struct Error {
     cause: String,
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.cause)
+    }
+}
+impl std::error::Error for Error {}
 
 type ParseResult<T> = Result<T, Error>;
 
@@ -175,34 +189,118 @@ struct Args {
     #[argh(positional)]
     input: PathBuf,
     #[argh(option, short = 'm', default = "Mode::default()")]
-    /// output mode
+    /// input mode
     mode: Mode,
+
+    #[argh(positional)]
+    /// output file. provide a `.png` or `.svg` to automatically pass through `dot`
+    output: Option<PathBuf>,
+
+    #[argh(switch, short = 'w')]
+    /// enables watching file for changes
+    watch: bool,
 }
 
-fn main() {
-    let args = argh::from_env::<Args>();
-    let file = std::fs::read_to_string(args.input).expect("Failed to open input file");
-    let mut parser = MyParser::parse(Rule::document, &file).expect("Failed to parse input file");
+struct Doc {
+    links: Vec<Link>,
+    defs: Vec<Def>,
+}
+
+fn parse_doc(path: &Path) -> anyhow::Result<Doc> {
+    let file = std::fs::read_to_string(path).context("Failed to open input file")?;
+    let mut parser =
+        MyParser::parse(Rule::document, &file).context("Failed to parse input file")?;
     let doc = parser.next().unwrap();
     let mut links: Vec<Link> = vec![];
     let mut defs: Vec<Def> = vec![];
     for tk in doc.into_inner() {
         match tk.as_rule() {
-            Rule::link => links.push(Link::parse(tk).unwrap()),
-            Rule::def => defs.push(Def::parse(tk).unwrap()),
+            Rule::link => links.push(Link::parse(tk)?),
+            Rule::def => defs.push(Def::parse(tk)?),
             Rule::EOI => break,
             _ => unreachable!("Got token {:?}", tk.as_rule()),
         }
     }
+    Ok(Doc { links, defs })
+}
+
+fn app(args: &Args) -> anyhow::Result<()> {
+    let doc = parse_doc(&args.input)?;
     let emitter = match args.mode {
         Mode::DER => emit_der,
         Mode::ORM => emit_orm,
     };
-    emitter(&mut std::io::stdout(), links.clone(), defs.clone()).unwrap();
-    emitter(
-        &mut std::fs::File::create("out.dot").unwrap(),
-        links.clone(),
-        defs.clone(),
-    )
-    .unwrap();
+    match &args.output {
+        None => emitter(&mut std::io::stdout(), &doc),
+        Some(path) => {
+            let mut out_file = std::fs::File::create(path).map(BufWriter::new)?;
+            if let Some(ext) = path.extension().and_then(|ext| ext.to_str())
+                && matches!(ext, "svg" | "png")
+            {
+                let mut dot = Command::new("dot")
+                    .args(&[&format!("-T{ext}")])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .context("dot not found. can't output images")?;
+                emitter(&mut dot.stdin.take().unwrap(), &doc)?;
+                if !dot.wait()?.success() {
+                    bail!("Dot failed.");
+                };
+
+                let mut cmd_output = dot.stdout.take().unwrap();
+                std::io::copy(&mut cmd_output, &mut out_file)?;
+                Ok(())
+            } else {
+                emitter(&mut out_file, &doc)
+            }
+        }
+    }?;
+    Ok(())
+}
+
+fn watch(args: Args) -> anyhow::Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(tx)?;
+
+    watcher.watch(Path::new("."), notify::RecursiveMode::NonRecursive)?;
+
+    let input = args.input.to_str().context("Not utf-8 path")?;
+    if let Err(e) = app(&args) {
+        eprintln!("Error: {e}")
+    }
+    for res in rx {
+        let ev = match res {
+            Err(e) => {
+                eprintln!("Error watching stuff: {e}");
+                break;
+            }
+            Ok(ev) => ev,
+        };
+        if !(ev.kind.is_create() || ev.kind.is_modify()) {
+            continue;
+        }
+
+        if !ev.paths.iter().any(|path| {
+            path.to_str()
+                .map(|path| path.contains(input))
+                .unwrap_or(false)
+        }) {
+            continue;
+        }
+
+        if let Err(e) = app(&args) {
+            eprintln!("Error: {e}")
+        }
+    }
+    Ok(())
+}
+
+fn main() {
+    let args = argh::from_env::<Args>();
+    if args.watch {
+        watch(args).unwrap()
+    } else {
+        app(&args).unwrap()
+    }
 }
